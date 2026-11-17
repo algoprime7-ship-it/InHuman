@@ -1,0 +1,50 @@
+name: Build InHuman Android app
+
+# Runs every time you change something in the android folder,
+# or press "Run workflow" on the Actions tab.
+on:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Restore signing key
+        run: base64 -d app/inhuman.keystore.b64 > app/inhuman.keystore
+
+      - name: Build APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Name the APK
+        run: cp app/build/outputs/apk/release/app-release.apk InHumanAI.apk
+
+      # Puts the APK on the repo's Releases page so you can download it straight to your phone (no zip)
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: InHuman AI build ${{ github.run_number }}
+          body: Download InHumanAI.apk below and open it on your Android phone to install.
+          files: android/InHumanAI.apk

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">InHuman AI</string>
+    <string name="accessibility_desc">Lets InHuman AI press Home, Back, Recent apps, open notifications and lock the screen when you ask it to by voice.</string>
+</resources>
