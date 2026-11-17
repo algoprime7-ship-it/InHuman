@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">InHuman AI</string>
+    <string name="accessibility_desc">Lets InHuman AI press Send in WhatsApp, Instagram and Messenger right after you ask it to send a message, and press Home, Back, Recent apps or Lock screen when you ask by voice. It only looks at those messaging apps.</string>
+</resources>

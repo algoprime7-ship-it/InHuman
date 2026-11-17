@@ -1,0 +1,9 @@
+{
+  "functions": {
+    "api/ask.js": { "maxDuration": 60 },
+    "api/analyze.js": { "maxDuration": 60 },
+    "api/email.js": { "maxDuration": 60 },
+    "api/music.js": { "maxDuration": 20 },
+    "api/yt.js": { "maxDuration": 20 }
+  }
+}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only watches WhatsApp, Instagram and Messenger, so it can press "Send" right after you give a command -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_desc"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:packageNames="com.whatsapp,com.whatsapp.w4b,com.instagram.android,com.facebook.orca,com.facebook.katana"
+    android:notificationTimeout="150"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="false" />

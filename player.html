@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <title>InHuman Player</title>
+    <style>
+        html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+        #p { width: 100%; height: 100%; }
+    </style>
+</head>
+<body>
+    <!-- Small YouTube player used by the floating circle (Android app) when the main app is closed -->
+    <div id="p"></div>
+    <script>
+        const params = new URLSearchParams(location.search);
+        const videoId = params.get('v') || '';
+        const startAt = Math.max(0, Math.floor(parseFloat(params.get('t') || '0')));
+        const bridge = window.InHumanPlayer || { state() {}, ended() {}, error() {} };
+        let player = null;
+
+        window.onYouTubeIframeAPIReady = () => {
+            player = new YT.Player('p', {
+                width: '100%',
+                height: '100%',
+                videoId,
+                playerVars: {
+                    autoplay: 1,
+                    playsinline: 1,
+                    start: startAt,
+                    rel: 0,
+                    modestbranding: 1,
+                    origin: location.origin,
+                    widget_referrer: location.href
+                },
+                events: {
+                    onReady: (e) => e.target.playVideo(),
+                    onStateChange: (e) => {
+                        bridge.state(e.data);
+                        if (e.data === 0) bridge.ended();
+                    },
+                    onError: (e) => bridge.error(e.data)
+                }
+            });
+        };
+
+        // Called by the Android app
+        window.inhumanCmd = (cmd) => {
+            if (!player || !player.pauseVideo) return;
+            if (cmd === 'pause') player.pauseVideo();
+            else if (cmd === 'play') player.playVideo();
+        };
+        window.inhumanTime = () => (player && player.getCurrentTime ? player.getCurrentTime() : 0);
+    </script>
+    <script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>
