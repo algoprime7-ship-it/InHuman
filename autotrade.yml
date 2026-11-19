@@ -1,0 +1,21 @@
+# Auto trades every 1h30 (Vercel's free plan can only run a timer once a day, so GitHub runs it).
+# Every 15 minutes this calls the site; the site only trades for accounts whose 1h30 is up,
+# and sends the "Target reached" / "Account lost" emails.
+# Optional: add a secret CRON_SECRET here (Settings → Secrets → Actions) AND on Vercel with the same value.
+name: Auto trades
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run auto trades
+        env:
+          SITE: https://inhuman56.vercel.app
+          KEY: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl -sS --max-time 70 "$SITE/api/mt5?action=tick&key=$KEY" || true
