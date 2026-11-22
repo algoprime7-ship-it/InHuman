@@ -1,0 +1,360 @@
+"""
+InHuman voice server (runs on your DigitalOcean droplet).
+
+Every reply the app speaks is sent here; Chatterbox (MIT licence, free for commercial use) speaks it in the
+voice of that face, cloned from a short sample you uploaded at  http://<droplet-ip>:8000/admin?key=<key>
+
+  POST /tts            {"text": "...", "face": "jarvis"}   header X-Key  ->  audio/mpeg
+  GET  /admin?key=...  phone page: upload a voice sample (audio or video) for each face
+  GET  /health         is it running, which voices are ready
+"""
+import hashlib
+import os
+import subprocess
+import tempfile
+import threading
+from pathlib import Path
+
+import torch
+import torchaudio as ta
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel
+
+ROOT = Path(os.environ.get("VOICE_ROOT", "/opt/inhuman-voice"))
+VOICES = ROOT / "voices"
+CACHE = ROOT / "cache"
+KEY = os.environ.get("VOICE_KEY", "")
+FACES = ["aether", "jarvis", "ultron", "him", "matrix", "sentinel", "specter", "friday"]
+# per face: (exaggeration, cfg_weight) for the original model; ignored by Turbo
+STYLE = {
+    "aether": (0.45, 0.5), "jarvis": (0.4, 0.5), "ultron": (0.6, 0.35), "him": (0.55, 0.35),
+    "matrix": (0.5, 0.45), "sentinel": (0.7, 0.3), "specter": (0.55, 0.45), "friday": (0.55, 0.5),
+}
+VOICES.mkdir(parents=True, exist_ok=True)
+CACHE.mkdir(parents=True, exist_ok=True)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"     # GPU droplet → much faster
+torch.set_num_threads(max(1, os.cpu_count() or 1))
+
+# ---------------- model (loaded once) ----------------
+MODEL = None
+KIND = ""
+LOCK = threading.Lock()
+
+
+def load_model():
+    global MODEL, KIND
+    errors = []
+    try:  # fastest on CPU
+        from chatterbox.tts_turbo import ChatterboxTurboTTS
+        if DEVICE == "cuda":
+            MODEL = ChatterboxTurboTTS.from_pretrained(device="cuda")
+            KIND = "turbo-gpu"
+            return
+        try:
+            MODEL = ChatterboxTurboTTS.from_pretrained(device="cpu", nano=True)
+            KIND = "turbo-nano"
+        except TypeError:
+            MODEL = ChatterboxTurboTTS.from_pretrained(device="cpu")
+            KIND = "turbo"
+        return
+    except Exception as e:  # older package without Turbo
+        errors.append(f"turbo: {e}")
+    from chatterbox.tts import ChatterboxTTS
+    MODEL = ChatterboxTTS.from_pretrained(device=DEVICE)
+    KIND = "original"
+    print("Loaded original Chatterbox:", errors)
+
+
+load_model()
+print(f"Chatterbox ready ({KIND}) on {torch.get_num_threads()} CPU threads")
+
+app = FastAPI()
+
+
+def check_key(k):
+    if not KEY or k != KEY:
+        raise HTTPException(status_code=401, detail="bad key")
+
+
+def voice_file(face: str) -> Path:
+    f = VOICES / f"{face}.wav"
+    if f.exists():
+        return f
+    # faces without their own sample borrow the closest one
+    for alt in {"him": "ultron", "ultron": "him", "sentinel": "ultron", "aether": "jarvis", "jarvis": "aether",
+                "matrix": "jarvis", "specter": "jarvis"}.get(face, "jarvis"), "jarvis", "aether":
+        if (VOICES / f"{alt}.wav").exists():
+            return VOICES / f"{alt}.wav"
+    raise HTTPException(status_code=404, detail=f"No voice sample for {face}. Upload one at /admin")
+
+
+class Req(BaseModel):
+    text: str
+    face: str = "aether"
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "model": KIND, "voices": sorted(p.stem for p in VOICES.glob("*.wav"))}
+
+
+@app.post("/tts")
+def tts(r: Req, x_key: str = Header(default="")):
+    check_key(x_key)
+    text = " ".join(r.text.split())[:600]
+    face = r.face if r.face in FACES else "aether"
+    if not text:
+        raise HTTPException(status_code=400, detail="no text")
+    out = render(face, text)
+    return FileResponse(out, media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=604800"})
+
+
+def render(face: str, text: str) -> Path:
+    ref = voice_file(face)
+    tag = hashlib.sha1(f"{face}|{ref.stat().st_mtime}|{KIND}|{text}".encode()).hexdigest()
+    out = CACHE / f"{tag}.mp3"
+    if not out.exists():
+        with LOCK:  # one at a time: the CPU is the limit
+            if KIND == "original":
+                ex, cfg = STYLE.get(face, (0.5, 0.5))
+                wav = MODEL.generate(text, audio_prompt_path=str(ref), exaggeration=ex, cfg_weight=cfg)
+            else:
+                wav = MODEL.generate(text, audio_prompt_path=str(ref))
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                ta.save(tmp.name, wav, MODEL.sr)
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", tmp.name, "-ac", "1", "-b:a", "96k", str(out)], check=True)
+                os.unlink(tmp.name)
+        trim_cache()
+    return out
+
+
+# lines the app says all the time: made ahead of time so they play instantly in your voice
+COMMON = ["Yes, sir?", "Yes, boss?", "I'm listening, human.", "I didn't catch that, sir.", "I didn't catch that, boss.",
+          "I didn't catch that, human.", "Say it again?", "Speak up, human.", "Say it again.", "Right away, sir.",
+          "On it, boss.", "Done, sir.", "Playing it now, sir.", "Good morning, sir.", "Good afternoon, sir.",
+          "Good evening, sir.", "Welcome back, sir.", "All systems are online.", "One moment, sir.", "One moment, boss.",
+          "Processing, human.", "Faaaaah!", "Jarvis sees buyers in full control of this market, The price is holding above its key moving averages on the fifteen minute, one hour and four hour charts, Momentum is pushing upward and every small dip is being bought quickly, Volatility is healthy, so there is room for the move to keep running, The stop loss sits safely below recent support to protect the account, The take profit targets the next area where sellers may step in.", "Jarvis is leaning towards a buy on this market, The short term trend has turned upward, even though the bigger picture is still deciding, Momentum is building slowly and the price is respecting its support, This is a smaller edge, so the position is kept tight and controlled, The stop loss sits below the last swing low in case buyers give up, The take profit aims for the nearest resistance above.", "Jarvis sees sellers in full control of this market, The price is trading below its key moving averages on the fifteen minute, one hour and four hour charts, Momentum is pushing downward and every small bounce is being sold quickly, Volatility is healthy, so there is room for the drop to keep running, The stop loss sits safely above recent resistance to protect the account, The take profit targets the next area where buyers may step in.", "Jarvis is leaning towards a sell on this market, The short term trend has turned downward, even though the bigger picture is still deciding, Momentum is fading and the price is struggling to break its resistance, This is a smaller edge, so the position is kept tight and controlled, The stop loss sits above the last swing high in case sellers give up, The take profit aims for the nearest support below.", "Now opening MetaTrader 5 and opening your trades, sir.", "Now opening MetaTrader 5 and opening your trades, boss.", "Now opening MetaTrader 5 and opening your trades, human.", "Hi, I'm Jarvis, J.A.R.V.I.S, just another rather very intelligent system, well, I am your app for now, Ask me any questions or commands.", "Unfortunately we have reached your time limit, goodbye.", "That's a violation of sector 619, I won't do that.", "I didn't catch that, sir, Say it again?", "I didn't catch that, boss, Say it again?", "Speak up, human, Say it again.", "I didn't catch that, ma'am.", "One moment, ma'am.", "Yes, ma'am?"]
+
+
+def warm(faces=None):
+    def run():
+        for face in (faces or [p.stem for p in VOICES.glob("*.wav") if p.stem in FACES]):   # only faces with their own clip
+            for line in COMMON:
+                try:
+                    render(face, line)
+                except Exception:
+                    pass
+    threading.Thread(target=run, daemon=True).start()
+
+
+warm()
+
+
+def trim_cache(limit=3000):
+    files = sorted(CACHE.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+    for p in files[:-limit]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+# ---------------- upload page (open on your phone) ----------------
+@app.post("/voices/{face}")
+async def upload(face: str, file: UploadFile = File(...), key: str = Query(default="")):
+    check_key(key)
+    if face not in FACES:
+        raise HTTPException(status_code=400, detail="unknown face")
+    raw = await file.read()
+    if len(raw) > 80 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="file too big (max 80 MB)")
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(raw)
+        src = tmp.name
+    dst = VOICES / f"{face}.wav"
+    # audio or video in, clean 20-second mono wav out
+    p = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vn", "-ac", "1", "-ar", "24000",
+                        "-af", "silenceremove=start_periods=1:start_threshold=-45dB,loudnorm", "-t", "20", str(dst)],
+                       capture_output=True, text=True)
+    os.unlink(src)
+    if p.returncode != 0 or not dst.exists():
+        raise HTTPException(status_code=400, detail="Could not read that file: " + p.stderr[-200:])
+    warm([face])      # new voice: make the common lines again in it
+    return {"ok": True, "face": face}
+
+
+@app.get("/voices/{face}.wav")
+def listen(face: str, key: str = Query(default="")):
+    check_key(key)
+    return FileResponse(voice_file(face), media_type="audio/wav")
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin(key: str = Query(default="")):
+    check_key(key)
+    have = {p.stem for p in VOICES.glob("*.wav")}
+    rows = "".join(f"""
+      <div class="card"><div class="top"><b>{f.capitalize()}</b><span class="{ 'ok' if f in have else 'no' }">{'✓ ready' if f in have else 'no voice yet'}</span></div>
+      {'<audio controls src="/voices/' + f + '.wav?key=' + key + '"></audio>' if f in have else ''}
+      <input type="file" accept="audio/*,video/*" data-face="{f}"><div class="msg" id="m-{f}"></div></div>""" for f in FACES)
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>InHuman voices</title><style>
+body{{background:#05070c;color:#e5e7eb;font:15px system-ui;margin:0;padding:16px}}h1{{font-size:18px}}
+.card{{border:1px solid #333;border-radius:14px;padding:12px;margin:10px 0;background:#0c111b}}
+.top{{display:flex;justify-content:space-between;margin-bottom:8px}}.ok{{color:#34d399}}.no{{color:#94a3b8}}
+audio{{width:100%;margin-bottom:8px}}.msg{{font-size:12px;color:#94a3b8;margin-top:6px}}p{{color:#94a3b8;font-size:13px}}
+</style></head><body><h1>InHuman voices · {KIND}</h1>
+<p>For each face pick a clear recording (10–20 seconds, one person talking, no music). Audio or video both work.
+Only use voices you have permission to use.</p>{rows}
+<script>
+document.querySelectorAll('input[type=file]').forEach(i=>i.onchange=async()=>{{
+ const f=i.files[0]; if(!f) return; const m=document.getElementById('m-'+i.dataset.face); m.textContent='Uploading…';
+ const fd=new FormData(); fd.append('file',f);
+ const r=await fetch('/voices/'+i.dataset.face+'?key={key}',{{method:'POST',body:fd}});
+ const d=await r.json().catch(()=>({{}}));
+ m.textContent=r.ok?'Saved ✓ (reloading)':'Error: '+(d.detail||r.status); if(r.ok) setTimeout(()=>location.reload(),900);
+}});
+</script></body></html>"""
+
+
+# =====================================================================================================
+# TikTok LIVE: reads joins + comments of your LIVE so Jarvis can talk to viewers.
+# Uses the unofficial TikTokLive library (installed by itself the first time). It can stop working if TikTok
+# changes things. The app polls  GET /tiktok/events?since=N  through Vercel (/api/live).
+#   POST /tiktok/start {"user": "sleazy2tone_"}   POST /tiktok/stop   GET /tiktok/events?since=0   (header X-Key)
+# =====================================================================================================
+import asyncio
+import collections
+import sys
+import time
+
+LIVE = {"user": "", "connected": False, "error": "", "seq": 0, "since": 0.0, "client": None, "loop": None}
+LIVE_EVENTS = collections.deque(maxlen=500)
+LIVE_LOCK = threading.Lock()
+
+
+def live_push(kind, **data):
+    with LIVE_LOCK:
+        LIVE["seq"] += 1
+        LIVE_EVENTS.append({"id": LIVE["seq"], "type": kind, "at": time.time(), **data})
+
+
+def _who(ev):
+    u = getattr(ev, "user", None) or getattr(ev, "user_info", None)
+    if u is None:
+        return "", ""
+    uid = getattr(u, "unique_id", None) or getattr(u, "username", None) or getattr(u, "uniqueId", None) or ""
+    nick = getattr(u, "nickname", None) or getattr(u, "nick_name", None) or uid
+    return str(uid), str(nick)
+
+
+def _tiktoklive():
+    try:
+        import TikTokLive  # noqa: F401
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "TikTokLive"], timeout=600)
+    from TikTokLive import TikTokLiveClient
+    from TikTokLive import events as E
+    return TikTokLiveClient, E
+
+
+def _live_worker():
+    while True:
+        user = LIVE["user"]
+        if not user:
+            time.sleep(1.5)
+            continue
+        try:
+            Client, E = _tiktoklive()
+            client = Client(unique_id="@" + user.lstrip("@"))
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            LIVE["client"], LIVE["loop"] = client, loop
+
+            async def on_connect(ev):
+                LIVE["connected"], LIVE["error"] = True, ""
+                live_push("connected")
+
+            async def on_comment(ev):
+                uid, nick = _who(ev)
+                text = getattr(ev, "comment", None) or getattr(ev, "content", None) or ""
+                if text:
+                    live_push("comment", user=uid, name=nick, text=str(text)[:300])
+
+            async def on_join(ev):
+                uid, nick = _who(ev)
+                if uid:
+                    live_push("join", user=uid, name=nick)
+
+            async def on_end(ev):
+                live_push("ended")
+
+            async def on_disconnect(ev):
+                LIVE["connected"] = False
+                live_push("disconnected")
+
+            async def on_warning(ev):
+                live_push("warning", what=type(ev).__name__)
+
+            client.add_listener(E.ConnectEvent, on_connect)
+            client.add_listener(E.CommentEvent, on_comment)
+            if hasattr(E, "JoinEvent"):
+                client.add_listener(E.JoinEvent, on_join)
+            for name in ("LiveEndEvent", "LivePauseEvent"):
+                if hasattr(E, name):
+                    client.add_listener(getattr(E, name), on_end if name == "LiveEndEvent" else on_warning)
+            if hasattr(E, "DisconnectEvent"):
+                client.add_listener(E.DisconnectEvent, on_disconnect)
+            # anything TikTok sends that looks like a warning / punishment for the host
+            for name in dir(E):
+                if name.endswith("Event") and any(w in name for w in ("Warn", "Punish", "Ban", "Violation")):
+                    client.add_listener(getattr(E, name), on_warning)
+
+            loop.run_until_complete(client.connect())       # returns when the LIVE ends or we disconnect
+        except Exception as e:
+            msg = str(e)[:200]
+            LIVE["error"] = "Not live yet" if "offline" in msg.lower() or "not live" in msg.lower() else msg
+        finally:
+            LIVE["connected"], LIVE["client"] = False, None
+        time.sleep(10)          # not live yet / dropped: try again shortly while LIVE mode is on
+
+
+threading.Thread(target=_live_worker, daemon=True).start()
+
+
+class LiveReq(BaseModel):
+    user: str = ""
+
+
+@app.post("/tiktok/start")
+def tiktok_start(r: LiveReq, x_key: str = Header(default="")):
+    check_key(x_key)
+    user = "".join(ch for ch in r.user.strip().lstrip("@") if ch.isalnum() or ch in "._")[:40]
+    if not user:
+        raise HTTPException(status_code=400, detail="no username")
+    LIVE["user"], LIVE["error"] = user, ""
+    with LIVE_LOCK:
+        LIVE_EVENTS.clear()
+    return {"ok": True, "user": user, "seq": LIVE["seq"]}
+
+
+@app.post("/tiktok/stop")
+def tiktok_stop(x_key: str = Header(default="")):
+    check_key(x_key)
+    LIVE["user"] = ""
+    c, loop = LIVE.get("client"), LIVE.get("loop")
+    if c and loop:
+        try:
+            asyncio.run_coroutine_threadsafe(c.disconnect(), loop)
+        except Exception:
+            pass
+    return {"ok": True}
+
+
+@app.get("/tiktok/events")
+def tiktok_events(since: int = Query(default=0), x_key: str = Header(default="")):
+    check_key(x_key)
+    with LIVE_LOCK:
+        items = [e for e in LIVE_EVENTS if e["id"] > since]
+    return {"user": LIVE["user"], "connected": LIVE["connected"], "error": LIVE["error"], "seq": LIVE["seq"], "events": items[-80:]}
