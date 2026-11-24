@@ -1,3 +1,5 @@
+```javascript
+```javascript
 // InHuman AI brain — POST /api/ask
 // Body: { message, history:[{role:'user'|'ai', text}], surface:'web'|'overlay', device:{...},
 //         context:{ emails:[{label,type,address}], groups:[name], mt5:bool, lot:number },
