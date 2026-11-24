@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Watches WhatsApp, Instagram and Messenger (to press "Send") and the Settings / quick panels (to flip Wi-Fi, Bluetooth,
+     hotspot and flight mode when you ask), TikTok, and web browsers (to type into and send on sites like Claude or ChatGPT). It only acts right after you give a command. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_desc"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:packageNames="com.zhiliaoapp.musically,com.ss.android.ugc.trill,com.whatsapp,com.whatsapp.w4b,com.instagram.android,com.facebook.orca,com.facebook.katana,com.android.settings,com.android.systemui,com.samsung.android.smartmirroring,com.google.android.settings.intelligence,com.android.settings.intelligence,com.android.chrome,com.chrome.beta,com.sec.android.app.sbrowser,org.mozilla.firefox,com.brave.browser,com.microsoft.emmx"
+    android:notificationTimeout="150"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true" />
